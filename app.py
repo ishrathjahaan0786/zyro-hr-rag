@@ -1,256 +1,87 @@
 import os
-import zipfile
-import shutil
 import streamlit as st
 
-from langchain_community.vectorstores import FAISS
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_groq import ChatGroq
-from langchain.chains import RetrievalQA
-
-
-# -----------------------------
-# PAGE SETTINGS
-# -----------------------------
+from langchain_community.embeddings import HuggingFaceBgeEmbeddings
+from langchain_community.vectorstores import FAISS
 
 st.set_page_config(
-    page_title="Zyro HR AI Assistant",
+    page_title="Zyro HR AI",
     page_icon="🤖",
     layout="wide"
 )
 
-
-st.title("🤖 Zyro HR AI Assistant")
-st.caption("Advanced RAG Assistant powered by FAISS + Groq + LangChain")
-
-
-# -----------------------------
-# FIX FAISS ZIP
-# -----------------------------
-
-def prepare_faiss():
-
-    if os.path.exists("zyro_faiss_index/index.faiss"):
-        return True
-
-
-    if os.path.exists("zyro_faiss_index.zip"):
-
-        with zipfile.ZipFile(
-            "zyro_faiss_index.zip",
-            "r"
-        ) as zip_ref:
-
-            zip_ref.extractall("temp")
-
-
-        # normal zip
-        if os.path.exists(
-            "temp/index.faiss"
-        ):
-
-            os.makedirs(
-                "zyro_faiss_index",
-                exist_ok=True
-            )
-
-            shutil.move(
-                "temp/index.faiss",
-                "zyro_faiss_index/index.faiss"
-            )
-
-            shutil.move(
-                "temp/index.pkl",
-                "zyro_faiss_index/index.pkl"
-            )
-
-
-        # folder inside zip
-        elif os.path.exists(
-            "temp/zyro_faiss_index"
-        ):
-
-            if os.path.exists("zyro_faiss_index"):
-                shutil.rmtree("zyro_faiss_index")
-
-            shutil.move(
-                "temp/zyro_faiss_index",
-                "zyro_faiss_index"
-            )
-
-
-        shutil.rmtree(
-            "temp",
-            ignore_errors=True
-        )
-
-    return os.path.exists(
-        "zyro_faiss_index/index.faiss"
-    )
-
-
-# -----------------------------
-# LOAD RAG SYSTEM
-# -----------------------------
+st.title("🏢 Zyro Dynamics HR Intelligence")
+st.caption("AI powered HR assistant using RAG + Groq + LangChain")
 
 @st.cache_resource
 def load_system():
-
-
-    ready = prepare_faiss()
-
-
-    if not ready:
-        st.error(
-            "FAISS index not found. Upload zyro_faiss_index.zip"
-        )
-        st.stop()
-
-
-
-    embeddings = HuggingFaceEmbeddings(
-
-        model_name=
-        "BAAI/bge-base-en-v1.5",
-
-        model_kwargs={
-            "device":"cpu"
-        },
-
-        encode_kwargs={
-            "normalize_embeddings":True
-        }
+    embeddings = HuggingFaceBgeEmbeddings(
+        model_name="BAAI/bge-base-en-v1.5",
+        encode_kwargs={"normalize_embeddings": True}
     )
-
 
     db = FAISS.load_local(
-
         "zyro_faiss_index",
-
         embeddings,
-
         allow_dangerous_deserialization=True
-
     )
-
-
-
-    api_key = st.secrets.get(
-        "GROQ_API_KEY"
-    )
-
-
-    if api_key is None:
-
-        st.error(
-            "Please add GROQ_API_KEY in HuggingFace Secrets"
-        )
-
-        st.stop()
-
-
 
     llm = ChatGroq(
-
-        groq_api_key=api_key,
-
-        model_name="llama-3.1-8b-instant",
-
+        api_key=st.secrets["GROQ_API_KEY"],
+        model_name="llama-3.3-70b-versatile",
         temperature=0
-
     )
 
+    return db, llm
 
+vectorstore, llm = load_system()
 
-    qa = RetrievalQA.from_chain_type(
+if "chat" not in st.session_state:
+    st.session_state.chat = []
 
-        llm=llm,
+for role, msg in st.session_state.chat:
+    with st.chat_message(role):
+        st.write(msg)
 
-        retriever=db.as_retriever(
-            search_kwargs={
-                "k":3
-            }
-        ),
-
-        return_source_documents=True
-
-    )
-
-
-    return qa
-
-
-
-qa = load_system()
-
-
-st.success(
-    "🔥 HR Knowledge Base Loaded Successfully"
-)
-
-
-# -----------------------------
-# USER INTERFACE
-# -----------------------------
-
-
-question = st.text_input(
-
-    "Ask your HR question 👇",
-
-    placeholder=
-    "Example: Can employees work from home permanently?"
-
-)
-
-
+question = st.chat_input("Ask your HR question...")
 
 if question:
+    st.session_state.chat.append(("user", question))
+    with st.chat_message("user"):
+        st.write(question)
 
+    docs = vectorstore.similarity_search(question, k=6)
+    context = "\n\n".join(d.page_content for d in docs)
 
-    with st.spinner(
-        "Thinking..."
-    ):
+    prompt = f"""
+You are Zyro Dynamics HR Policy Expert.
 
+Use only this context.
+If unavailable say Information Not Available.
 
-        result = qa.invoke(
-            {
-                "query": question
-            }
-        )
+Context:
+{context}
 
+Question:
+{question}
 
-    st.subheader(
-        "💡 Answer"
-    )
+Answer with:
+Decision:
+Policy Explanation:
+"""
 
+    response = llm.invoke(prompt).content
 
-    st.write(
-        result["result"]
-    )
+    sources = set()
+    for d in docs[:3]:
+        sources.add(d.metadata["source"].split("/")[-1])
 
+    response += "\n\n📚 Sources:\n"
+    for s in sources:
+        response += "- " + s + "\n"
 
+    with st.chat_message("assistant"):
+        st.write(response)
 
-    st.subheader(
-        "📚 Sources"
-    )
-
-
-    for doc in result["source_documents"]:
-
-
-        source = doc.metadata.get(
-            "source",
-            "Unknown"
-        )
-
-
-        page = doc.metadata.get(
-            "page",
-            "?"
-        )
-
-
-        st.write(
-            f"📄 {source} - Page {page}"
-        )
+    st.session_state.chat.append(("assistant", response))
